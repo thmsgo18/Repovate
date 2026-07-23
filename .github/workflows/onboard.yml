@@ -1,0 +1,128 @@
+name: Repovate — Onboard
+
+# Phase 1 minimal onboarding (docs/architecture.md section 5, 9): a
+# read-only analysis pass over a monitored repo, producing .agent/onboarding.json.
+# Called from the monitored repo via workflow_call, so all checkouts below
+# default to that repo unless a `repository:` override is given.
+
+on:
+  workflow_call:
+    secrets:
+      anthropic_api_key:
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  onboard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout monitored repository
+        uses: actions/checkout@v4
+
+      - name: Analyze repository (Claude Code, read-only)
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.anthropic_api_key }}
+          claude_args: |
+            --allowedTools Read,Write
+          prompt: |
+            You are performing a one-time onboarding analysis of this repository
+            for Repovate, an autonomous maintenance agent. Your only job right now
+            is to read and understand this codebase — do not fix, refactor, or
+            change anything in it.
+
+            Analyze the repository and write a single JSON object to exactly one
+            file: `.agent/onboarding.json`. Do not create, edit, or delete any
+            other file.
+
+            The JSON object must have exactly this shape (types matter — use
+            `null` for an unknown value, never omit a required key):
+
+            {
+              "languages": string[],
+              "frameworks": string[],
+              "architecture_summary": string,
+              "entry_points": string[],
+              "code_conventions": string,
+              "test_suite": {
+                "present": boolean,
+                "framework": string | null,
+                "command": string | null,
+                "coverage_estimate": string | null
+              },
+              "manifests_detected": string[]
+            }
+
+            Field notes:
+            - languages: programming languages actually used, e.g. ["php"].
+            - frameworks: frameworks/major libraries that shape the architecture,
+              e.g. ["symfony"]. Empty array if none.
+            - architecture_summary: 3-6 sentences — what the app does and how it
+              is structured (layers, key modules, request/data flow).
+            - entry_points: the handful of files a new contributor should read
+              first to understand how the app starts and is wired together.
+            - code_conventions: naming/style conventions you actually observe in
+              the code (not generic advice) — this guides future patches so they
+              match the existing style.
+            - test_suite: if there is no test framework configured and no tests
+              present, set present to false and the other three fields to null.
+              Do not guess or invent a test setup that isn't there.
+            - manifests_detected: dependency manifest files found at the repo
+              root or elsewhere, e.g. ["composer.json"].
+
+            Do not include "generated_at" or "agent_version" in the JSON — a
+            later step adds those.
+
+            Base every field strictly on what you find in the repository.
+
+      - name: Verify Claude touched only .agent/onboarding.json
+        run: |
+          unexpected=$(git status --porcelain | awk '{print $2}' | grep -v '^\.agent/onboarding\.json$' || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::Onboarding analysis modified files outside .agent/onboarding.json: $unexpected"
+            exit 1
+          fi
+          if ! git status --porcelain | grep -q '\.agent/onboarding\.json$'; then
+            echo "::error::Onboarding analysis did not produce .agent/onboarding.json"
+            exit 1
+          fi
+
+      - name: Checkout Repovate tooling
+        uses: actions/checkout@v4
+        with:
+          repository: thmsgo18/Repovate
+          ref: main
+          path: .repovate-tooling
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: .repovate-tooling/package-lock.json
+
+      - name: Install and build Repovate tooling
+        working-directory: .repovate-tooling
+        run: |
+          npm ci
+          npm run build
+
+      - name: Validate and finalize onboarding.json
+        run: node ${{ github.workspace }}/.repovate-tooling/dist/index.js
+        env:
+          INPUT_STEP: onboard
+          REPOVATE_VERSION: ${{ github.sha }}
+
+      - name: Commit onboarding.json
+        run: |
+          git config user.name "repovate[bot]"
+          git config user.email "repovate-bot@users.noreply.github.com"
+          git add .agent/onboarding.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore(repovate): onboarding analysis"
+            git push
+          fi
