@@ -1,6 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { z } from "zod";
+import { readJsonFile, writeJsonFile } from "./json-file.js";
 import { statePath } from "./paths.js";
 
 export const stateSchema = z.object({
@@ -21,20 +20,10 @@ export function defaultState(): AgentState {
 
 /** Returns schema defaults if no state has been persisted yet — a fresh repo is never "broken", just unstarted. */
 export async function readState(repoRoot: string): Promise<AgentState> {
-  const filePath = statePath(repoRoot);
-  let raw: string;
-  try {
-    raw = await readFile(filePath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return defaultState();
-    throw error;
-  }
-  return stateSchema.parse(JSON.parse(raw));
+  const state = await readJsonFile(statePath(repoRoot), stateSchema);
+  return state ?? defaultState();
 }
 
 export async function writeState(repoRoot: string, data: AgentState): Promise<void> {
-  const validated = stateSchema.parse(data);
-  const filePath = statePath(repoRoot);
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(validated, null, 2)}\n`, "utf8");
+  await writeJsonFile(statePath(repoRoot), stateSchema, data);
 }

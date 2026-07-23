@@ -1,6 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { z } from "zod";
+import { readJsonFile, writeJsonFile } from "./json-file.js";
 import { onboardingPath } from "./paths.js";
 
 export const testSuiteSchema = z.object({
@@ -28,20 +27,9 @@ export type TestSuite = z.infer<typeof testSuiteSchema>;
 
 /** Returns null if no onboarding has run yet for this repo. */
 export async function readOnboarding(repoRoot: string): Promise<Onboarding | null> {
-  const filePath = onboardingPath(repoRoot);
-  let raw: string;
-  try {
-    raw = await readFile(filePath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-  return onboardingSchema.parse(JSON.parse(raw));
+  return readJsonFile(onboardingPath(repoRoot), onboardingSchema);
 }
 
 export async function writeOnboarding(repoRoot: string, data: Onboarding): Promise<void> {
-  const validated = onboardingSchema.parse(data);
-  const filePath = onboardingPath(repoRoot);
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(validated, null, 2)}\n`, "utf8");
+  await writeJsonFile(onboardingPath(repoRoot), onboardingSchema, data);
 }

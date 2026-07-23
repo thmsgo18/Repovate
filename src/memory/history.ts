@@ -1,6 +1,7 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { readJsonFile, writeJsonFile } from "./json-file.js";
 import { historyDir, historyEntryPath } from "./paths.js";
 
 export const historyStatusSchema = z.enum([
@@ -39,22 +40,11 @@ export type HistoryEntry = z.infer<typeof historyEntrySchema>;
 export type HistoryStatus = z.infer<typeof historyStatusSchema>;
 
 export async function readHistoryEntry(repoRoot: string, id: string): Promise<HistoryEntry | null> {
-  const filePath = historyEntryPath(repoRoot, id);
-  let raw: string;
-  try {
-    raw = await readFile(filePath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-  return historyEntrySchema.parse(JSON.parse(raw));
+  return readJsonFile(historyEntryPath(repoRoot, id), historyEntrySchema);
 }
 
 export async function writeHistoryEntry(repoRoot: string, entry: HistoryEntry): Promise<void> {
-  const validated = historyEntrySchema.parse(entry);
-  const filePath = historyEntryPath(repoRoot, validated.id);
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(validated, null, 2)}\n`, "utf8");
+  await writeJsonFile(historyEntryPath(repoRoot, entry.id), historyEntrySchema, entry);
 }
 
 export async function listHistoryEntries(repoRoot: string): Promise<HistoryEntry[]> {
@@ -65,12 +55,14 @@ export async function listHistoryEntries(repoRoot: string): Promise<HistoryEntry
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-  const raws = await Promise.all(
+  const entries = await Promise.all(
     files
       .filter((file) => file.endsWith(".json"))
-      .map((file) => readFile(path.join(historyDir(repoRoot), file), "utf8")),
+      .map((file) => readJsonFile(path.join(historyDir(repoRoot), file), historyEntrySchema)),
   );
-  return raws.map((raw) => historyEntrySchema.parse(JSON.parse(raw)));
+  // Each file was just listed by readdir, so a null (ENOENT) read here would
+  // only happen from a concurrent delete — safe to drop rather than crash.
+  return entries.filter((entry): entry is HistoryEntry => entry !== null);
 }
 
 /**
