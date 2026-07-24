@@ -126,6 +126,8 @@ jobs:
           REPOVATE_VERSION: ${{ github.sha }}
 
       - name: Commit onboarding.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "repovate[bot]"
           git config user.email "repovate-bot@users.noreply.github.com"
@@ -134,5 +136,11 @@ jobs:
             echo "No changes to commit."
           else
             git commit -m "chore(repovate): onboarding analysis"
+            # Push with an explicit, self-contained credential rather than
+            # relying on whatever actions/checkout left configured — the
+            # prior run failed to push with a valid-looking Contents:write
+            # token and no clear cause found in the logs, so don't depend
+            # on ambient state here.
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
             git push
           fi
