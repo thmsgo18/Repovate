@@ -101,6 +101,10 @@ jobs:
           repository: thmsgo18/Repovate
           ref: main
           path: .repovate-tooling
+          # This checkout is read-only (build tooling only) — never push here.
+          # Without this, it overwrites the credentials the first checkout
+          # (of the monitored repo) needs for the later `git push`.
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
