@@ -83,12 +83,14 @@ jobs:
 
       - name: Verify Claude touched only .agent/onboarding.json
         run: |
-          unexpected=$(git status --porcelain | awk '{print $2}' | grep -v '^\.agent/onboarding\.json$' || true)
+          # --untracked-files=all forces git to list files inside a brand new
+          # directory individually, instead of collapsing it to one "?? .agent/" line.
+          unexpected=$(git status --porcelain --untracked-files=all | awk '{print $2}' | grep -v '^\.agent/onboarding\.json$' || true)
           if [ -n "$unexpected" ]; then
             echo "::error::Onboarding analysis modified files outside .agent/onboarding.json: $unexpected"
             exit 1
           fi
-          if ! git status --porcelain | grep -q '\.agent/onboarding\.json$'; then
+          if ! git status --porcelain --untracked-files=all | grep -q '\.agent/onboarding\.json$'; then
             echo "::error::Onboarding analysis did not produce .agent/onboarding.json"
             exit 1
           fi
