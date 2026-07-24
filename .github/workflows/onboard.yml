@@ -17,6 +17,7 @@ permissions:
 jobs:
   onboard:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout monitored repository
         uses: actions/checkout@v4
@@ -27,6 +28,8 @@ jobs:
           anthropic_api_key: ${{ secrets.anthropic_api_key }}
           claude_args: |
             --allowedTools Read,Write
+            --model claude-sonnet-5
+            --max-turns 15
           prompt: |
             You are performing a one-time onboarding analysis of this repository
             for Repovate, an autonomous maintenance agent. Your only job right now
