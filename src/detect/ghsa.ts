@@ -12,8 +12,11 @@ const SEVERITY_MAP: Record<string, Severity> = {
   CRITICAL: "critical",
 };
 
+// GHSA's GraphQL enum (confirmed via introspection on SecurityAdvisoryEcosystem)
+// uses "PIP" for Python — doesn't match OSV's "PyPI" or our own "pypi".
 const ECOSYSTEM_MAP: Record<string, string> = {
   npm: "NPM",
+  pypi: "PIP",
 };
 
 interface GhsaAdvisoryNode {

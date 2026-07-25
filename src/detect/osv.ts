@@ -35,6 +35,14 @@ const SEVERITY_MAP: Record<string, Severity> = {
   CRITICAL: "critical",
 };
 
+// OSV's ecosystem identifiers are case-sensitive proper nouns that don't
+// match our own canonical lowercase names, or GHSA's (which wants "PIP" for
+// the same ecosystem we call "pypi") — see src/detect/ghsa.ts.
+const ECOSYSTEM_MAP: Record<string, string> = {
+  npm: "npm",
+  pypi: "PyPI",
+};
+
 function chunk<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
@@ -49,12 +57,14 @@ async function osvFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-/** For each dependency, the set of OSV advisory IDs known to affect the exact queried version. */
-async function queryBatch(deps: DependencyRef[]): Promise<string[][]> {
-  const results: string[][] = [];
-  for (const batch of chunk(deps, BATCH_CHUNK_SIZE)) {
+/** For each dependency, the set of OSV advisory IDs known to affect the exact queried version. Deps in an ecosystem OSV has no mapping for are silently skipped. */
+async function queryBatch(deps: DependencyRef[]): Promise<Map<DependencyRef, string[]>> {
+  const results = new Map<DependencyRef, string[]>();
+  const queryable = deps.filter((d) => ECOSYSTEM_MAP[d.ecosystem]);
+
+  for (const batch of chunk(queryable, BATCH_CHUNK_SIZE)) {
     const queries: OsvBatchQuery[] = batch.map((dep) => ({
-      package: { name: dep.name, ecosystem: dep.ecosystem },
+      package: { name: dep.name, ecosystem: ECOSYSTEM_MAP[dep.ecosystem]! },
       version: dep.version,
     }));
     const response = await osvFetch<OsvBatchResponse>("/querybatch", {
@@ -62,7 +72,10 @@ async function queryBatch(deps: DependencyRef[]): Promise<string[][]> {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ queries }),
     });
-    results.push(...response.results.map((r) => (r.vulns ?? []).map((v) => v.id)));
+    response.results.forEach((r, i) => {
+      const dep = batch[i];
+      if (dep) results.set(dep, (r.vulns ?? []).map((v) => v.id));
+    });
   }
   return results;
 }
@@ -91,14 +104,13 @@ function normalize(detail: OsvVulnDetail, dep: DependencyRef): NormalizedAdvisor
 export async function fetchOsvAdvisories(deps: DependencyRef[]): Promise<NormalizedAdvisory[]> {
   if (deps.length === 0) return [];
 
-  const idsPerDep = await queryBatch(deps);
+  const idsByDep = await queryBatch(deps);
   const detailCache = new Map<string, Promise<OsvVulnDetail>>();
   const advisories: NormalizedAdvisory[] = [];
 
-  for (let i = 0; i < deps.length; i++) {
-    const dep = deps[i];
-    const ids = idsPerDep[i];
-    if (!dep || !ids) continue;
+  for (const dep of deps) {
+    const ids = idsByDep.get(dep);
+    if (!ids) continue;
     for (const id of ids) {
       let detailPromise = detailCache.get(id);
       if (!detailPromise) {

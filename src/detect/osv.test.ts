@@ -121,4 +121,19 @@ describe("fetchOsvAdvisories", () => {
 
     await expect(fetchOsvAdvisories([dep()])).rejects.toThrow(/querybatch.*500/);
   });
+
+  it("maps our internal 'pypi' ecosystem to OSV's 'PyPI' — case-sensitive, doesn't match GHSA's 'PIP'", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ results: [{}] }));
+
+    await fetchOsvAdvisories([dep({ name: "django", version: "6.0.2", ecosystem: "pypi" })]);
+
+    const [, batchInit] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(batchInit.body).queries[0].package.ecosystem).toBe("PyPI");
+  });
+
+  it("skips (rather than sending a malformed query for) a dependency in an unmapped ecosystem", async () => {
+    const result = await fetchOsvAdvisories([dep({ ecosystem: "cargo" as never })]);
+    expect(result).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

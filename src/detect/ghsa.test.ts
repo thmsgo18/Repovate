@@ -125,6 +125,15 @@ describe("fetchGhsaAdvisories", () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({}, false, 401));
     await expect(fetchGhsaAdvisories([dep()], "t")).rejects.toThrow(/401/);
   });
+
+  it("maps our internal 'pypi' ecosystem to GHSA's 'PIP' — doesn't match OSV's 'PyPI'", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ data: { securityVulnerabilities: { nodes: [] } } }));
+
+    await fetchGhsaAdvisories([dep({ name: "django", version: "6.0.2", ecosystem: "pypi" })], "t");
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(init.body).variables).toEqual({ ecosystem: "PIP", package: "django" });
+  });
 });
 
 describe("findDependabotPr", () => {
