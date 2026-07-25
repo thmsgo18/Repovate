@@ -37,7 +37,7 @@ permissions:
 jobs:
   remediate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout monitored repository
         uses: actions/checkout@v4
@@ -55,7 +55,7 @@ jobs:
           claude_args: |
             --allowedTools Read,Edit,Write,Bash
             --model claude-sonnet-5
-            --max-turns 30
+            --max-turns 50
           prompt: |
             A security advisory affects a dependency used in this repository:
 
