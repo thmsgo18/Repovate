@@ -1,0 +1,135 @@
+name: Repovate — Remediate (skeleton)
+
+# Phase 1 item 6 (docs/architecture.md's own hardened pipeline lands in
+# Phase 2): a single job, no patch/verify/publish isolation, no retry loop,
+# no auto-merge — manually fed one vulnerability at a time via
+# workflow_call inputs. Proves the riskiest remaining unknown: can the
+# coding agent write a correct, in-context patch and get it into a PR.
+
+on:
+  workflow_call:
+    inputs:
+      package_name:
+        required: true
+        type: string
+      current_version:
+        required: true
+        type: string
+      advisory_id:
+        required: true
+        type: string
+      advisory_summary:
+        required: true
+        type: string
+      advisory_url:
+        required: false
+        type: string
+        default: ""
+    secrets:
+      anthropic_api_key:
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  remediate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout monitored repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Patch vulnerable dependency (Claude Code)
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.anthropic_api_key }}
+          claude_args: |
+            --allowedTools Read,Edit,Write,Bash
+            --model claude-sonnet-5
+            --max-turns 30
+          prompt: |
+            A security advisory affects a dependency used in this repository:
+
+            - Package: ${{ inputs.package_name }}
+            - Version currently in use: ${{ inputs.current_version }}
+            - Advisory: ${{ inputs.advisory_id }}
+            - Summary: ${{ inputs.advisory_summary }}
+            - Reference: ${{ inputs.advisory_url }}
+
+            Fix this vulnerability in a way that matches how this codebase
+            actually uses the dependency. Before deciding on a fix, read the
+            relevant manifest (e.g. package.json / package-lock.json) and
+            the code that actually imports/calls this package.
+
+            - If bumping to a patched version is sufficient, do that: update
+              the manifest and run the package manager's own install/update
+              command so the lockfile is regenerated consistently. Never
+              hand-edit a lockfile directly.
+            - If the vulnerable code path is genuinely reachable and a
+              version bump alone would not fix it, adapt the calling code
+              too, consistent with the existing style and conventions.
+            - Do not fix unrelated issues, refactor unrelated code, or
+              upgrade unrelated dependencies.
+
+            After making the change, find and run this repository's own
+            test suite if one exists (check the relevant package.json's
+            "scripts" for a "test" command) and confirm it passes. If there
+            is no test suite for the code you changed, say so explicitly in
+            your final message instead of claiming you verified anything.
+
+            Do not create a branch, commit, push, or open a pull request —
+            a later step in this workflow handles that. Just make the code
+            changes and leave them as uncommitted changes in the working
+            tree, and end your final message with a short, human-readable
+            explanation of what you changed and why (this will be reused
+            in the pull request description).
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if [ -z "$(git status --porcelain --untracked-files=all)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No changes were made — nothing to open a PR for."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open pull request
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch="repovate/${{ inputs.advisory_id }}"
+          git config user.name "repovate[bot]"
+          git config user.email "repovate-bot@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add -A
+          git commit -m "fix(security): patch ${{ inputs.package_name }} — ${{ inputs.advisory_id }}"
+          # Explicit credential, not ambient checkout state — see the
+          # onboarding pipeline's own "Commit onboarding.json" step for why.
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git push -u origin "$branch"
+          cat > /tmp/pr-body.md <<BODY
+          This PR was opened automatically by **Repovate**, an autonomous maintenance agent — not a human.
+
+          **Vulnerability:** ${{ inputs.advisory_id }}
+          **Package:** \`${{ inputs.package_name }}\` (was \`${{ inputs.current_version }}\`)
+          **Summary:** ${{ inputs.advisory_summary }}
+          **Reference:** ${{ inputs.advisory_url }}
+
+          ---
+
+          This is Phase 1 of Repovate — the patch/verify/publish isolation described in the project's architecture doc is not yet in place (that lands in Phase 2), and there is no retry loop or auto-merge here. Review the diff carefully before merging.
+          BODY
+
+          gh pr create \
+            --title "[Repovate] Fix ${{ inputs.advisory_id }} in ${{ inputs.package_name }}" \
+            --body-file /tmp/pr-body.md
