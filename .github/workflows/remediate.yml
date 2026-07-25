@@ -51,6 +51,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.anthropic_api_key }}
+          show_full_output: true
           claude_args: |
             --allowedTools Read,Edit,Write,Bash
             --model claude-sonnet-5
