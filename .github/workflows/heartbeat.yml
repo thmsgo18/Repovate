@@ -1,0 +1,52 @@
+name: Repovate — Heartbeat
+
+# Phase 2 item 10 (docs/architecture.md section 8): GitHub auto-disables a
+# scheduled workflow after 60 days with no repository activity — a real
+# risk given this project's whole point is dormant personal repos. Push a
+# throwaway commit to a dedicated, unprotected branch on every scheduled
+# run so the repo always shows recent activity. Best-effort, not a
+# GitHub-documented guarantee — see the architecture doc for the fallback
+# (GitHub's own disablement email + a manual workflow_dispatch rerun).
+#
+# Deliberately independent from remediate.yml: this must keep running even
+# if the remediation pipeline itself has a bug, since its only job is
+# proving the repo is alive. No secrets, no API key, no target-repo code
+# execution — just a git push.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: write
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout monitored repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Push heartbeat commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "repovate[bot]"
+          git config user.email "repovate-bot@users.noreply.github.com"
+
+          # Orphan + force-push: one throwaway commit per run, never an
+          # accumulating history — this branch exists purely as an activity
+          # signal, nothing here is meant to be read or kept.
+          git checkout --orphan agent/heartbeat
+          git rm -rf --cached . > /dev/null 2>&1 || true
+          git clean -fdx
+
+          mkdir -p .agent
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .agent/heartbeat
+          git add .agent/heartbeat
+          git commit -m "chore(repovate): heartbeat"
+
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git push --force origin agent/heartbeat
