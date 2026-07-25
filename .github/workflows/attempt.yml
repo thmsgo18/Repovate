@@ -127,9 +127,19 @@ jobs:
 
             ${{ inputs.attempt_number > 1 && 'This is a retry — a previous attempt did not pass. Before doing anything else, read /tmp/previous-attempt/diff.patch (what was tried) and /tmp/previous-attempt/log.txt (why it failed, if that file exists) and take the failure into account.' || 'This is the first attempt.' }}
 
-            You do NOT have a Bash tool in this job — you cannot run
-            install, build, or test commands here, on purpose. Edit the
-            manifest and source files directly:
+            You do NOT have a Bash tool, WebFetch, or WebSearch in this job
+            — no shell, no internet access, on purpose. Do not attempt to
+            look up the advisory, the changelog, or the patched version
+            online, and do not try `curl` or any other workaround via a
+            tool that isn't available to you — every attempt will simply
+            be denied and waste your turn budget. Determine the fix from
+            your own knowledge of this package plus what you can Read in
+            this repository (manifest, lockfile, source). If you are not
+            confident which version fixes this advisory, pick the latest
+            stable release of the package — a conservative but reasonable
+            default — rather than spending turns trying to research it.
+
+            Edit the manifest and source files directly:
 
             - If bumping to a patched version is sufficient, edit the
               version string for "${{ inputs.package_name }}" directly in
