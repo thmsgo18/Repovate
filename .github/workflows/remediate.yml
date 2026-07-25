@@ -1,10 +1,11 @@
-name: Repovate — Remediate (skeleton)
+name: Repovate — Remediate
 
-# Phase 1 item 6 (docs/architecture.md's own hardened pipeline lands in
-# Phase 2): a single job, no patch/verify/publish isolation, no retry loop,
-# no auto-merge — manually fed one vulnerability at a time via
-# workflow_call inputs. Proves the riskiest remaining unknown: can the
-# coding agent write a correct, in-context patch and get it into a PR.
+# Phase 2 items 8-9 (docs/architecture.md section 7): orchestrates up to 3
+# isolated patch/verify cycles (attempt.yml) and publishes the result.
+# Never auto-merges — that's a later phase, gated on its own config.
+#
+# Still fed one vulnerability at a time via workflow_call inputs; wiring
+# this to real detection + an autonomy decision engine is a later phase.
 
 on:
   workflow_call:
@@ -25,6 +26,11 @@ on:
         required: false
         type: string
         default: ""
+      manifest_dir:
+        description: "Directory containing the manifest to patch, relative to repo root (monorepo support)"
+        required: false
+        type: string
+        default: "."
     secrets:
       anthropic_api_key:
         required: true
@@ -35,89 +41,154 @@ permissions:
   id-token: write
 
 jobs:
-  remediate:
+  attempt-1:
+    uses: thmsgo18/Repovate/.github/workflows/attempt.yml@main
+    with:
+      package_name: ${{ inputs.package_name }}
+      current_version: ${{ inputs.current_version }}
+      advisory_id: ${{ inputs.advisory_id }}
+      advisory_summary: ${{ inputs.advisory_summary }}
+      advisory_url: ${{ inputs.advisory_url }}
+      manifest_dir: ${{ inputs.manifest_dir }}
+      attempt_number: 1
+    secrets:
+      anthropic_api_key: ${{ secrets.anthropic_api_key }}
+
+  # Retries only if attempt-1 actually produced a change that then failed
+  # verification — never retry a "Claude made no changes" outcome
+  # identically, that's not going to change on its own and just spends
+  # money for nothing.
+  attempt-2:
+    needs: attempt-1
+    if: needs.attempt-1.outputs.diff_produced == 'true' && needs.attempt-1.outputs.passed != 'true'
+    uses: thmsgo18/Repovate/.github/workflows/attempt.yml@main
+    with:
+      package_name: ${{ inputs.package_name }}
+      current_version: ${{ inputs.current_version }}
+      advisory_id: ${{ inputs.advisory_id }}
+      advisory_summary: ${{ inputs.advisory_summary }}
+      advisory_url: ${{ inputs.advisory_url }}
+      manifest_dir: ${{ inputs.manifest_dir }}
+      attempt_number: 2
+      previous_diff_artifact: ${{ needs.attempt-1.outputs.diff_artifact }}
+      previous_log_artifact: ${{ needs.attempt-1.outputs.log_artifact }}
+    secrets:
+      anthropic_api_key: ${{ secrets.anthropic_api_key }}
+
+  attempt-3:
+    needs: attempt-2
+    if: needs.attempt-2.outputs.diff_produced == 'true' && needs.attempt-2.outputs.passed != 'true'
+    uses: thmsgo18/Repovate/.github/workflows/attempt.yml@main
+    with:
+      package_name: ${{ inputs.package_name }}
+      current_version: ${{ inputs.current_version }}
+      advisory_id: ${{ inputs.advisory_id }}
+      advisory_summary: ${{ inputs.advisory_summary }}
+      advisory_url: ${{ inputs.advisory_url }}
+      manifest_dir: ${{ inputs.manifest_dir }}
+      attempt_number: 3
+      previous_diff_artifact: ${{ needs.attempt-2.outputs.diff_artifact }}
+      previous_log_artifact: ${{ needs.attempt-2.outputs.log_artifact }}
+    secrets:
+      anthropic_api_key: ${{ secrets.anthropic_api_key }}
+
+  publish:
+    needs: [attempt-1, attempt-2, attempt-3]
+    if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      A1_PASSED: ${{ needs.attempt-1.outputs.passed }}
+      A1_DIFF_PRODUCED: ${{ needs.attempt-1.outputs.diff_produced }}
+      A1_DIFF_ARTIFACT: ${{ needs.attempt-1.outputs.diff_artifact }}
+      A1_LOG_ARTIFACT: ${{ needs.attempt-1.outputs.log_artifact }}
+      A2_PASSED: ${{ needs.attempt-2.outputs.passed }}
+      A2_DIFF_PRODUCED: ${{ needs.attempt-2.outputs.diff_produced }}
+      A2_DIFF_ARTIFACT: ${{ needs.attempt-2.outputs.diff_artifact }}
+      A2_LOG_ARTIFACT: ${{ needs.attempt-2.outputs.log_artifact }}
+      A3_PASSED: ${{ needs.attempt-3.outputs.passed }}
+      A3_DIFF_PRODUCED: ${{ needs.attempt-3.outputs.diff_produced }}
+      A3_DIFF_ARTIFACT: ${{ needs.attempt-3.outputs.diff_artifact }}
+      A3_LOG_ARTIFACT: ${{ needs.attempt-3.outputs.log_artifact }}
     steps:
+      - name: Determine outcome
+        id: outcome
+        run: |
+          # Only one attempt can ever have passed — the chain stops the
+          # moment one does — so scan newest-first and take the first hit.
+          for n in 3 2 1; do
+            passed_var="A${n}_PASSED"
+            diff_var="A${n}_DIFF_ARTIFACT"
+            if [ "${!passed_var}" = "true" ]; then
+              echo "status=passed" >> "$GITHUB_OUTPUT"
+              echo "diff_artifact=${!diff_var}" >> "$GITHUB_OUTPUT"
+              echo "attempt_number=$n" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          # Nothing passed — fall back to the last attempt that actually
+          # produced a diff, for a best-effort draft PR.
+          for n in 3 2 1; do
+            produced_var="A${n}_DIFF_PRODUCED"
+            if [ "${!produced_var}" = "true" ]; then
+              diff_var="A${n}_DIFF_ARTIFACT"
+              log_var="A${n}_LOG_ARTIFACT"
+              echo "status=failed" >> "$GITHUB_OUTPUT"
+              echo "diff_artifact=${!diff_var}" >> "$GITHUB_OUTPUT"
+              echo "log_artifact=${!log_var}" >> "$GITHUB_OUTPUT"
+              echo "attempt_number=$n" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          echo "status=nothing" >> "$GITHUB_OUTPUT"
+
+      - name: Log no-op outcome
+        if: steps.outcome.outputs.status == 'nothing'
+        run: |
+          echo "::notice::Repovate made no changes for ${{ inputs.advisory_id }} in ${{ inputs.package_name }} — no PR opened."
+
       - name: Checkout monitored repository
+        if: steps.outcome.outputs.status != 'nothing'
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Download diff
+        if: steps.outcome.outputs.status != 'nothing'
+        uses: actions/download-artifact@v4
         with:
-          node-version: "20"
+          name: ${{ steps.outcome.outputs.diff_artifact }}
+          path: /tmp/publish
 
-      - name: Patch vulnerable dependency (Claude Code)
-        uses: anthropics/claude-code-action@v1
+      - name: Download logs
+        if: steps.outcome.outputs.status == 'failed'
+        uses: actions/download-artifact@v4
         with:
-          anthropic_api_key: ${{ secrets.anthropic_api_key }}
-          show_full_output: true
-          claude_args: |
-            --allowedTools Read,Edit,Write,Bash
-            --model claude-sonnet-5
-            --max-turns 50
-          prompt: |
-            A security advisory affects a dependency used in this repository:
+          name: ${{ steps.outcome.outputs.log_artifact }}
+          path: /tmp/publish
 
-            - Package: ${{ inputs.package_name }}
-            - Version currently in use: ${{ inputs.current_version }}
-            - Advisory: ${{ inputs.advisory_id }}
-            - Summary: ${{ inputs.advisory_summary }}
-            - Reference: ${{ inputs.advisory_url }}
-
-            Fix this vulnerability in a way that matches how this codebase
-            actually uses the dependency. Before deciding on a fix, read the
-            relevant manifest (e.g. package.json / package-lock.json) and
-            the code that actually imports/calls this package.
-
-            - If bumping to a patched version is sufficient, do that: update
-              the manifest and run the package manager's own install/update
-              command so the lockfile is regenerated consistently. Never
-              hand-edit a lockfile directly.
-            - If the vulnerable code path is genuinely reachable and a
-              version bump alone would not fix it, adapt the calling code
-              too, consistent with the existing style and conventions.
-            - Do not fix unrelated issues, refactor unrelated code, or
-              upgrade unrelated dependencies.
-
-            After making the change, find and run this repository's own
-            test suite if one exists (check the relevant package.json's
-            "scripts" for a "test" command) and confirm it passes. If there
-            is no test suite for the code you changed, say so explicitly in
-            your final message instead of claiming you verified anything.
-
-            Do not create a branch, commit, push, or open a pull request —
-            a later step in this workflow handles that. Just make the code
-            changes and leave them as uncommitted changes in the working
-            tree, and end your final message with a short, human-readable
-            explanation of what you changed and why (this will be reused
-            in the pull request description).
-
-      - name: Check for changes
-        id: diff
-        run: |
-          if [ -z "$(git status --porcelain --untracked-files=all)" ]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "No changes were made — nothing to open a PR for."
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Open pull request
-        if: steps.diff.outputs.changed == 'true'
+      - name: Apply, commit, and open PR
+        if: steps.outcome.outputs.status != 'nothing'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          branch="repovate/${{ inputs.advisory_id }}"
+          git apply /tmp/publish/diff.patch
           git config user.name "repovate[bot]"
           git config user.email "repovate-bot@users.noreply.github.com"
+
+          branch="repovate/${{ inputs.advisory_id }}"
           git checkout -b "$branch"
           git add -A
           git commit -m "fix(security): patch ${{ inputs.package_name }} — ${{ inputs.advisory_id }}"
-          # Explicit credential, not ambient checkout state — see the
-          # onboarding pipeline's own "Commit onboarding.json" step for why.
+          # Explicit credential, not ambient checkout state — see
+          # docs/architecture.md section 7 / the onboarding pipeline's
+          # own "Commit onboarding.json" step for why.
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           git push -u origin "$branch"
+
           cat > /tmp/pr-body.md <<BODY
           This PR was opened automatically by **Repovate**, an autonomous maintenance agent — not a human.
 
@@ -125,12 +196,31 @@ jobs:
           **Package:** \`${{ inputs.package_name }}\` (was \`${{ inputs.current_version }}\`)
           **Summary:** ${{ inputs.advisory_summary }}
           **Reference:** ${{ inputs.advisory_url }}
+          **Attempt:** ${{ steps.outcome.outputs.attempt_number }} of up to 3
 
           ---
 
-          This is Phase 1 of Repovate — the patch/verify/publish isolation described in the project's architecture doc is not yet in place (that lands in Phase 2), and there is no retry loop or auto-merge here. Review the diff carefully before merging.
+          This is Repovate's isolated patch/verify pipeline: the coding step never executed this repository's code, and a separate step ran the actual install/test. No auto-merge — review the diff carefully before merging.
           BODY
 
-          gh pr create \
-            --title "[Repovate] Fix ${{ inputs.advisory_id }} in ${{ inputs.package_name }}" \
-            --body-file /tmp/pr-body.md
+          if [ "${{ steps.outcome.outputs.status }}" = "failed" ]; then
+            {
+              echo ""
+              echo "---"
+              echo ""
+              echo "**⚠️ This patch did NOT pass verification after up to 3 attempts.** Tests failed or the install step errored. Do not merge without reviewing carefully. Last attempt's log (tail):"
+              echo ""
+              echo '```'
+              tail -100 /tmp/publish/log.txt 2>/dev/null
+              echo '```'
+            } >> /tmp/pr-body.md
+          fi
+
+          title="[Repovate] Fix ${{ inputs.advisory_id }} in ${{ inputs.package_name }}"
+          draft_flag=""
+          if [ "${{ steps.outcome.outputs.status }}" = "failed" ]; then
+            title="[Repovate][NEEDS REVIEW] Fix ${{ inputs.advisory_id }} in ${{ inputs.package_name }} (tests failing)"
+            draft_flag="--draft"
+          fi
+
+          gh pr create $draft_flag --title "$title" --body-file /tmp/pr-body.md
