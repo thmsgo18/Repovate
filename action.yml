@@ -7,7 +7,7 @@ author: "thmsgo18"
 # and 7). Not yet wired to any real logic.
 inputs:
   step:
-    description: "Which pipeline step to run: onboard | detect | patch | verify | publish"
+    description: "Which pipeline step to run: onboard | decide | record-history"
     required: true
   repo-path:
     description: "Path to the checked-out repository being maintained"

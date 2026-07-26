@@ -2,10 +2,16 @@ name: Repovate — Remediate
 
 # Phase 2 items 8-9 (docs/architecture.md section 7): orchestrates up to 3
 # isolated patch/verify cycles (attempt.yml) and publishes the result.
-# Never auto-merges — that's a later phase, gated on its own config.
 #
-# Still fed one vulnerability at a time via workflow_call inputs; wiring
-# this to real detection + an autonomy decision engine is a later phase.
+# Phase 4 (docs/architecture.md section 4): the publish job now runs the
+# autonomy decision engine (src/autonomy) once verification has produced a
+# real outcome, and — only when that engine says the finding is eligible —
+# attempts an auto-merge with a dedicated fine-grained PAT. Detection of a
+# branch-protection rejection is reactive, not proactive: the merge is
+# attempted, and if GitHub refuses it the PR is simply left open.
+#
+# Still fed one vulnerability at a time via workflow_call inputs — wiring
+# this to a real detection dispatcher (orchestrate.yml) is a later phase.
 
 on:
   workflow_call:
@@ -31,9 +37,41 @@ on:
         required: false
         type: string
         default: "."
+      trigger:
+        description: "cve | eol_dependency | new_technology — feeds the autonomy decision engine"
+        required: false
+        type: string
+        default: "cve"
+      severity:
+        description: "critical | high | medium | low"
+        required: false
+        type: string
+        default: "medium"
+      ecosystem:
+        description: "npm | pypi — recorded in .agent/history, not used for patching logic here"
+        required: false
+        type: string
+        default: "npm"
+      cisa_kev:
+        required: false
+        type: boolean
+        default: false
+      cvss:
+        description: "CVSS score as a string, empty if unknown"
+        required: false
+        type: string
+        default: ""
+      aliases:
+        description: "Comma-separated alias ids (e.g. CVE-xxxx), empty if none"
+        required: false
+        type: string
+        default: ""
     secrets:
       anthropic_api_key:
         required: true
+      repovate_pat:
+        description: "Fine-grained PAT (Contents + Pull requests) required for auto-merge. Without it, an auto-merge-eligible finding still opens a normal PR — it just isn't merged automatically."
+        required: false
 
 permissions:
   contents: write
@@ -105,14 +143,17 @@ jobs:
       A1_DIFF_PRODUCED: ${{ needs.attempt-1.outputs.diff_produced }}
       A1_DIFF_ARTIFACT: ${{ needs.attempt-1.outputs.diff_artifact }}
       A1_LOG_ARTIFACT: ${{ needs.attempt-1.outputs.log_artifact }}
+      A1_TESTS_RAN: ${{ needs.attempt-1.outputs.tests_ran }}
       A2_PASSED: ${{ needs.attempt-2.outputs.passed }}
       A2_DIFF_PRODUCED: ${{ needs.attempt-2.outputs.diff_produced }}
       A2_DIFF_ARTIFACT: ${{ needs.attempt-2.outputs.diff_artifact }}
       A2_LOG_ARTIFACT: ${{ needs.attempt-2.outputs.log_artifact }}
+      A2_TESTS_RAN: ${{ needs.attempt-2.outputs.tests_ran }}
       A3_PASSED: ${{ needs.attempt-3.outputs.passed }}
       A3_DIFF_PRODUCED: ${{ needs.attempt-3.outputs.diff_produced }}
       A3_DIFF_ARTIFACT: ${{ needs.attempt-3.outputs.diff_artifact }}
       A3_LOG_ARTIFACT: ${{ needs.attempt-3.outputs.log_artifact }}
+      A3_TESTS_RAN: ${{ needs.attempt-3.outputs.tests_ran }}
     steps:
       - name: Determine outcome
         id: outcome
@@ -122,10 +163,12 @@ jobs:
           for n in 3 2 1; do
             passed_var="A${n}_PASSED"
             diff_var="A${n}_DIFF_ARTIFACT"
+            tests_ran_var="A${n}_TESTS_RAN"
             if [ "${!passed_var}" = "true" ]; then
               echo "status=passed" >> "$GITHUB_OUTPUT"
               echo "diff_artifact=${!diff_var}" >> "$GITHUB_OUTPUT"
               echo "attempt_number=$n" >> "$GITHUB_OUTPUT"
+              echo "tests_ran=${!tests_ran_var}" >> "$GITHUB_OUTPUT"
               exit 0
             fi
           done
@@ -153,8 +196,15 @@ jobs:
           echo "::notice::Repovate made no changes for ${{ inputs.advisory_id }} in ${{ inputs.package_name }} — no PR opened."
 
       - name: Checkout monitored repository
-        if: steps.outcome.outputs.status != 'nothing'
         uses: actions/checkout@v4
+
+      # Needed later to return to the default branch before committing
+      # .agent/history/<id>.json — the checkout above may end up on a
+      # feature branch by the time we get there (see "Apply, commit, and
+      # open PR" below).
+      - name: Record default branch
+        id: repo_info
+        run: echo "default_branch=$(git rev-parse --abbrev-ref HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Download diff
         if: steps.outcome.outputs.status != 'nothing'
@@ -171,6 +221,7 @@ jobs:
           path: /tmp/publish
 
       - name: Apply, commit, and open PR
+        id: create_pr
         if: steps.outcome.outputs.status != 'nothing'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -200,7 +251,7 @@ jobs:
 
           ---
 
-          This is Repovate's isolated patch/verify pipeline: the coding step never executed this repository's code, and a separate step ran the actual install/test. No auto-merge — review the diff carefully before merging.
+          This is Repovate's isolated patch/verify pipeline: the coding step never executed this repository's code, and a separate step ran the actual install/test. Merge behavior is decided by Repovate's autonomy engine based on `.agentconfig.yml` — see the run summary for the reasoning.
           BODY
 
           if [ "${{ steps.outcome.outputs.status }}" = "failed" ]; then
@@ -223,4 +274,133 @@ jobs:
             draft_flag="--draft"
           fi
 
-          gh pr create $draft_flag --title "$title" --body-file /tmp/pr-body.md
+          pr_url=$(gh pr create $draft_flag --title "$title" --body-file /tmp/pr-body.md)
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Repovate tooling
+        uses: actions/checkout@v4
+        with:
+          repository: thmsgo18/Repovate
+          ref: main
+          path: .repovate-tooling
+          # Read-only build tooling only — never push here. Without this,
+          # it overwrites the credentials the monitored-repo checkout
+          # needs for its own `git push` calls elsewhere in this job.
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: .repovate-tooling/package-lock.json
+
+      - name: Install and build Repovate tooling
+        working-directory: .repovate-tooling
+        run: |
+          npm ci
+          npm run build
+
+      - name: Decide autonomy action (Phase 4 — only meaningful once tests actually ran)
+        id: decide
+        if: steps.outcome.outputs.status == 'passed'
+        run: node ${{ github.workspace }}/.repovate-tooling/dist/index.js
+        env:
+          INPUT_STEP: decide
+          INPUT_TRIGGER: ${{ inputs.trigger }}
+          INPUT_SEVERITY: ${{ inputs.severity }}
+          INPUT_CISA-KEV: ${{ inputs.cisa_kev }}
+          INPUT_TESTS-RAN: ${{ steps.outcome.outputs.tests_ran }}
+          INPUT_TESTS-PASSED: "true"
+          INPUT_DIFF-PATH: /tmp/publish/diff.patch
+
+      - name: Attempt auto-merge (reactive branch-protection detection — no pre-check, no retry)
+        id: automerge
+        if: steps.outcome.outputs.status == 'passed' && steps.decide.outputs.auto-merge-eligible == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.repovate_pat }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::${{ inputs.advisory_id }} is auto-merge eligible, but no repovate_pat secret is configured — leaving it as a normal PR for manual merge."
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # docs/architecture.md section 7: no proactive branch-protection
+          # API check — just attempt the merge and react to whatever
+          # GitHub decides. If it's rejected (required review, required
+          # status check, etc.), the PR simply stays open. No retry.
+          if gh pr merge --squash "${{ steps.create_pr.outputs.branch }}"; then
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Auto-merge for ${{ inputs.advisory_id }} was rejected by GitHub (likely branch protection) — PR left open for manual review."
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine history status
+        id: history
+        run: |
+          case "${{ steps.outcome.outputs.status }}" in
+            passed)
+              if [ "${{ steps.decide.outputs.auto-merge-eligible }}" = "true" ] && [ "${{ steps.automerge.outputs.merged }}" = "true" ]; then
+                echo "status=auto_merged" >> "$GITHUB_OUTPUT"
+                echo "event=auto_merged" >> "$GITHUB_OUTPUT"
+              elif [ "${{ steps.decide.outputs.auto-merge-eligible }}" = "true" ]; then
+                echo "status=merge_blocked_by_branch_protection" >> "$GITHUB_OUTPUT"
+                echo "event=auto_merge_blocked" >> "$GITHUB_OUTPUT"
+              else
+                echo "status=pr_open" >> "$GITHUB_OUTPUT"
+                echo "event=pr_opened" >> "$GITHUB_OUTPUT"
+              fi
+              echo "autonomy_applied=${{ steps.decide.outputs.action }}" >> "$GITHUB_OUTPUT"
+              ;;
+            failed)
+              echo "status=tests_failed_draft" >> "$GITHUB_OUTPUT"
+              echo "event=draft_pr_opened_tests_failing" >> "$GITHUB_OUTPUT"
+              echo "autonomy_applied=pr_only" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "status=detected" >> "$GITHUB_OUTPUT"
+              echo "event=no_change_produced" >> "$GITHUB_OUTPUT"
+              echo "autonomy_applied=pr_only" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Return to the default branch for the history commit
+        run: |
+          git fetch origin "${{ steps.repo_info.outputs.default_branch }}"
+          git checkout "${{ steps.repo_info.outputs.default_branch }}"
+          git reset --hard "origin/${{ steps.repo_info.outputs.default_branch }}"
+
+      - name: Record history
+        run: node ${{ github.workspace }}/.repovate-tooling/dist/index.js
+        env:
+          INPUT_STEP: record-history
+          INPUT_ADVISORY-ID: ${{ inputs.advisory_id }}
+          INPUT_STATUS: ${{ steps.history.outputs.status }}
+          INPUT_EVENT: ${{ steps.history.outputs.event }}
+          INPUT_PACKAGE: ${{ inputs.package_name }}
+          INPUT_ECOSYSTEM: ${{ inputs.ecosystem }}
+          INPUT_SEVERITY: ${{ inputs.severity }}
+          INPUT_CVSS: ${{ inputs.cvss }}
+          INPUT_CISA-KEV: ${{ inputs.cisa_kev }}
+          INPUT_ALIASES: ${{ inputs.aliases }}
+          INPUT_PR-URL: ${{ steps.create_pr.outputs.pr_url }}
+          INPUT_PR-DRAFT: ${{ steps.outcome.outputs.status == 'failed' }}
+          INPUT_AUTONOMY-APPLIED: ${{ steps.history.outputs.autonomy_applied }}
+          INPUT_PATCH-ATTEMPTS: ${{ steps.outcome.outputs.attempt_number }}
+
+      - name: Commit history entry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "repovate[bot]"
+          git config user.email "repovate-bot@users.noreply.github.com"
+          git add .agent/history/
+          if git diff --cached --quiet; then
+            echo "No history changes to commit."
+          else
+            git commit -m "chore(repovate): update history for ${{ inputs.advisory_id }}"
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+            git push
+          fi

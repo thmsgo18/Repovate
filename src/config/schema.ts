@@ -1,8 +1,8 @@
 import { z } from "zod";
 
-const triggerSchema = z.enum(["cve", "eol_dependency", "new_technology"]);
-const severitySchema = z.enum(["critical", "high", "medium", "low"]);
-const actionSchema = z.enum(["auto_merge", "pr_only", "branch_only"]);
+export const triggerSchema = z.enum(["cve", "eol_dependency", "new_technology"]);
+export const severitySchema = z.enum(["critical", "high", "medium", "low"]);
+export const actionSchema = z.enum(["auto_merge", "pr_only", "branch_only"]);
 
 const matchSchema = z.object({
   trigger: triggerSchema,

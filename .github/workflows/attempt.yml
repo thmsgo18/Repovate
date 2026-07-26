@@ -69,6 +69,9 @@ on:
       log_artifact:
         description: "Name of this attempt's install/test log artifact"
         value: ${{ jobs.verify.outputs.log_artifact }}
+      tests_ran:
+        description: "'true' only if an actual test suite was found and executed — 'false' if the patch didn't apply, install failed, or the target repo has no test script (docs/architecture.md section 4: no test suite detected forces autonomy to pr_only)"
+        value: ${{ jobs.verify.outputs.tests_ran }}
 
 jobs:
   patch:
@@ -187,6 +190,7 @@ jobs:
       passed: ${{ steps.result.outputs.passed }}
       diff_artifact: ${{ steps.result.outputs.diff_artifact }}
       log_artifact: ${{ steps.result.outputs.log_artifact }}
+      tests_ran: ${{ steps.result.outputs.tests_ran }}
     steps:
       - name: Checkout monitored repository
         uses: actions/checkout@v4
@@ -260,6 +264,7 @@ jobs:
 
           if [ "${{ steps.apply.outputs.applied }}" != "true" ]; then
             echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "tests_ran=false" >> "$GITHUB_OUTPUT"
             # No diff to capture — the patch didn't even apply. Still write
             # an (empty) file so the upload step below has something to
             # find; an absent artifact would break the next retry's
@@ -275,6 +280,18 @@ jobs:
             echo "passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # "no_tests" means install succeeded but the target repo has no
+          # test script — passed=true in that case (nothing failed), but
+          # tests_ran must stay false so the autonomy decision engine can
+          # still apply its own "no test suite → never auto_merge" hard
+          # rule (docs/architecture.md section 4), independent of whether
+          # this attempt otherwise looked like a clean pass.
+          if [ "$test_ok" = "true" ] || [ "$test_ok" = "false" ]; then
+            echo "tests_ran=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tests_ran=false" >> "$GITHUB_OUTPUT"
           fi
 
           # Capture the full resulting diff (manifest edit + whatever
