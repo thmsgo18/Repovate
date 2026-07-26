@@ -1,22 +1,9 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import type { DependencyRef } from "./types.js";
+import type { DependencyRef, ManifestDetectionResult } from "./types.js";
 
-export interface NpmDetectionResult {
-  /** Path to package.json, relative to repo root. */
-  manifestPath: string;
-  /** Path to package-lock.json, relative to repo root — null if none was found. */
-  lockfilePath: string | null;
-  dependencies: DependencyRef[];
-  /**
-   * "full" once a lockfile was parsed (direct + transitive, exact resolved
-   * versions). "direct-only" when there is no lockfile — per
-   * docs/architecture.md 4.2.1, this must be surfaced to the user
-   * ("dépendances transitives non vérifiées, aucun lockfile présent"),
-   * never silently treated as equivalent to full coverage.
-   */
-  transitiveCoverage: "full" | "direct-only";
-}
+/** npm's manifest/lockfile result shape is exactly the shared one — kept as a named alias so existing imports of this name don't break. */
+export type NpmDetectionResult = ManifestDetectionResult;
 
 const SKIP_DIRS = new Set(["node_modules", ".git", ".repovate-tooling"]);
 
